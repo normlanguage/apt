@@ -25,7 +25,7 @@ permissions:
   deployments: read
 
 env:
-  NORM_TOOLING_COMMIT: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+  NORM_TOOLING_COMMIT: b3bc52b62831f81b072f96d9948debee756e62c2
   APT_SITE_URL: https://normlanguage.github.io/apt
 
 jobs:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: normlanguage/Norm
-          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          ref: ${{ env.NORM_TOOLING_COMMIT }}
           path: norm-tooling
 
       - uses: actions/setup-node@v6
@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: normlanguage/Norm
-          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          ref: ${{ env.NORM_TOOLING_COMMIT }}
           path: norm-tooling
 
       - uses: actions/download-artifact@v5
@@ -130,7 +130,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: normlanguage/Norm
-          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          ref: ${{ env.NORM_TOOLING_COMMIT }}
           path: norm-tooling
 
       - uses: actions/download-artifact@v5
@@ -196,7 +196,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: normlanguage/Norm
-          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          ref: ${{ env.NORM_TOOLING_COMMIT }}
           path: norm-tooling
 
       - uses: actions/download-artifact@v5
