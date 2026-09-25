@@ -25,7 +25,7 @@ permissions:
   deployments: read
 
 env:
-  NORM_TOOLING_COMMIT: b3bc52b62831f81b072f96d9948debee756e62c2
+  NORM_TOOLING_COMMIT: cf58cbb234ba9e12409ec2f2c2d656332b0163ff
   APT_SITE_URL: https://normlanguage.github.io/apt
 
 jobs:
@@ -51,7 +51,7 @@ jobs:
           node-version: '24'
 
       - name: Test release selection and immutable planning
-        run: node --test scripts/publication.test.mjs
+        run: node --test norm-tooling/cli/compiler/scripts/release-publication.test.mjs
 
       - name: Select attested releases and verify existing publication
         id: plan

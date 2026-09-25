@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { assertSigningKeyLifetime, planPublication, selectCompleteReleases } from './publication.mjs';
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options });
@@ -50,20 +49,14 @@ async function main() {
   const renew = process.env.APT_RENEW_SIGNING_KEY === 'true';
   const bootstrap = process.env.APT_BOOTSTRAP === 'true';
   if (!/^https:\/\//.test(site) || !/^[a-fA-F0-9]{40}$/.test(toolingCommit)) throw new Error('Invalid publication identity');
+  const { assertSigningKeyLifetime, downloadAttestedReleaseAsset, officialReleaseSources, planPublication } = await import(pathToFileURL(join(tooling, 'cli/compiler/scripts/release-publication.mjs')).href);
   mkdirSync(output, { recursive: true });
   const publicKey = resolve('normlang-archive-keyring.asc');
   const keyListing = run('gpg', ['--show-keys', '--with-colons', publicKey]);
   const fingerprint = keyListing.split('\n').find(line => line.startsWith('fpr:'))?.split(':')[9];
   if (!/^[a-fA-F0-9]{40}$/.test(fingerprint ?? '')) throw new Error('Invalid pinned APT public key');
   assertSigningKeyLifetime(keyListing);
-  const releaseModel = await import(pathToFileURL(join(tooling, 'cli/compiler/scripts/release-model.mjs')).href);
-  const targets = releaseModel.releaseTargets.map(value => value.target);
-  const records = JSON.parse(run('gh', ['api', 'repos/normlanguage/Norm/releases?per_page=100']));
-  const selected = selectCompleteReleases(records, targets, releaseModel.releaseAssetName);
-  for (const value of selected) {
-    run('git', ['fetch', '--no-tags', 'origin', `refs/tags/${value.tag}`], { cwd: tooling });
-    value.sourceCommit = run('git', ['rev-parse', 'FETCH_HEAD^{commit}'], { cwd: tooling }).trim();
-  }
+  const selected = officialReleaseSources(tooling);
 
   let published = null;
   const live = join(output, 'live');
@@ -115,11 +108,7 @@ async function main() {
   for (const version of plan.build) {
     const value = selected.find(item => item.version === version);
     const directory = join(output, 'assets', version);
-    mkdirSync(directory, { recursive: true });
-    run('gh', ['release', 'download', value.tag, '--repo', 'normlanguage/Norm', '--pattern', value.assetName, '--pattern', 'SHA256SUMS', '--dir', directory]);
-    if (sha256(readFileSync(join(directory, value.assetName))) !== value.assetSha256) throw new Error(`GitHub release asset digest mismatch: ${version}`);
-    const attestation = run('gh', ['attestation', 'verify', join(directory, value.assetName), '--repo', 'normlanguage/Norm', '--source-ref', `refs/tags/${value.tag}`, '--source-digest', value.sourceCommit, '--signer-workflow', 'normlanguage/Norm/.github/workflows/release.yml', '--format', 'json']);
-    writeFileSync(join(directory, 'attestation.json'), attestation);
+    downloadAttestedReleaseAsset(value, directory);
   }
   console.log(JSON.stringify({ changed: plan.changed, selected: selected.map(value => value.version), build: plan.build, reuse: plan.reuse }));
 }
