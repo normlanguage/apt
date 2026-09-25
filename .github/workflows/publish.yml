@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       renew_signing_key:
-        description: Renew the public key for the same fingerprint and re-sign metadata
+        description: Explicitly refresh signed metadata or renew the same-fingerprint public key
         required: false
         type: boolean
         default: false
