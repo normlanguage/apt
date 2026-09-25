@@ -5,6 +5,8 @@ This repository publishes the signed Debian 13 `amd64` packages for [Norm](https
 Install the repository key and verify its fingerprint:
 
 ```sh
+sudo apt update
+sudo apt install ca-certificates curl gnupg
 curl -fsSL https://normlanguage.github.io/apt/normlang-archive-keyring.asc -o normlang-archive-keyring.asc
 gpg --show-keys --fingerprint normlang-archive-keyring.asc
 ```
