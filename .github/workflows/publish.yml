@@ -1,0 +1,213 @@
+name: Publish signed APT repository
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: First publication when no Pages deployment exists
+        required: false
+        type: boolean
+        default: false
+      renew_signing_key:
+        description: Renew the public key for the same fingerprint and re-sign metadata
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: norm-apt-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: read
+
+env:
+  NORM_TOOLING_COMMIT: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+  APT_SITE_URL: https://normlanguage.github.io/apt
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      changed: ${{ steps.plan.outputs.changed }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APT_BOOTSTRAP: ${{ inputs.bootstrap || false }}
+      APT_RENEW_SIGNING_KEY: ${{ inputs.renew_signing_key || false }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/checkout@v6
+        with:
+          repository: normlanguage/Norm
+          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          path: norm-tooling
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Test release selection and immutable planning
+        run: node --test scripts/publication.test.mjs
+
+      - name: Select attested releases and verify existing publication
+        id: plan
+        run: node scripts/prepare.mjs norm-tooling "$APT_SITE_URL" handoff "$NORM_TOOLING_COMMIT"
+
+      - name: Preserve verified inputs
+        if: steps.plan.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-publication-inputs
+          path: handoff/
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-22.04
+    container: debian:trixie
+    environment: production
+    env:
+      GNUPGHOME: ${{ github.workspace }}/.apt-gnupg
+      APT_SIGNING_SUBKEY: ${{ secrets.APT_SIGNING_SUBKEY }}
+      APT_SIGNING_FINGERPRINT: ${{ vars.APT_SIGNING_FINGERPRINT }}
+    steps:
+      - name: Install Debian packaging tools and ELF providers
+        run: apt-get update && apt-get install -y apt-utils ca-certificates dpkg-dev gcc git gnupg libasound2t64 libfreetype6 libx11-6 libxext6 libxi6 libxrender1 libxtst6 nodejs tar zlib1g
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/checkout@v6
+        with:
+          repository: normlanguage/Norm
+          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          path: norm-tooling
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: apt-publication-inputs
+          path: handoff
+
+      - name: Import signing subkey and verify identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$APT_SIGNING_SUBKEY" | gpg --batch --import
+          test -n "$APT_SIGNING_FINGERPRINT"
+          gpg --with-colons --list-secret-keys "$APT_SIGNING_FINGERPRINT" | awk -F: -v expected="$APT_SIGNING_FINGERPRINT" '$1 == "fpr" && $10 == expected { found = 1 } END { exit !found }'
+
+      - name: Build missing packages and sign both repository snapshots
+        run: node scripts/build.mjs norm-tooling handoff built "$APT_SIGNING_FINGERPRINT" normlang-archive-keyring.asc
+
+      - name: Upload signed candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-signed-candidate
+          path: |
+            built/apt-repository/
+            built/apt-repository-old/
+          if-no-files-found: error
+
+  consumer:
+    needs: build
+    runs-on: ubuntu-22.04
+    container: debian:trixie
+    env:
+      NORM_APT_FULL_ACCEPTANCE: '1'
+      NORM_APT_TAMPER_CHECK: '1'
+      NORM_APT_EVIDENCE_DIRECTORY: ${{ github.workspace }}/apt-evidence
+    steps:
+      - name: Install consumer tools only
+        run: apt-get update && apt-get install -y ca-certificates curl git nodejs passwd python3
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/checkout@v6
+        with:
+          repository: normlanguage/Norm
+          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          path: norm-tooling
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: apt-signed-candidate
+          path: candidate
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: apt-publication-inputs
+          path: handoff
+
+      - name: Install, upgrade, validate CLI LSP Native, and remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(node -p 'require("./handoff/plan.json").selected[0].version')"
+          previous="$(node -p 'require("./handoff/plan.json").selected[1].version')"
+          cd norm-tooling
+          bash cli/compiler/scripts/apt-acceptance.sh ../candidate/apt-repository-old ../candidate/apt-repository ../apt-repository-live "$current" "$previous"
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-acceptance-evidence
+          path: apt-evidence/
+          if-no-files-found: warn
+
+  deploy:
+    needs: [build, consumer]
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: apt-signed-candidate
+          path: candidate
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: candidate/apt-repository
+
+      - id: pages
+        uses: actions/deploy-pages@v4
+
+  public-consumer:
+    needs: deploy
+    runs-on: ubuntu-22.04
+    container: debian:trixie
+    steps:
+      - name: Install public consumer tools only
+        run: apt-get update && apt-get install -y ca-certificates curl git nodejs passwd
+
+      - uses: actions/checkout@v6
+
+      - uses: actions/checkout@v6
+        with:
+          repository: normlanguage/Norm
+          ref: 2f75ed174a87e635ea4f594c27734d75d5d5b814
+          path: norm-tooling
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: apt-publication-inputs
+          path: handoff
+
+      - name: Install and upgrade from public HTTPS source
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(node -p 'require("./handoff/plan.json").selected[0].version')"
+          previous="$(node -p 'require("./handoff/plan.json").selected[1].version')"
+          bash scripts/public-acceptance.sh "$APT_SITE_URL" "$current" "$previous"
