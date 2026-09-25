@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 function run(command, args, options = {}) {
@@ -20,7 +20,10 @@ const output = resolve(process.argv[4]);
 const fingerprint = process.argv[5];
 const pinnedKey = resolve(process.argv[6]);
 const plan = JSON.parse(readFileSync(join(input, 'plan.json'), 'utf8'));
-if (plan.schemaVersion !== 1 || !plan.changed || plan.selected.length !== 2 || !/^[a-fA-F0-9]{40}$/.test(fingerprint)) throw new Error('Invalid APT publication plan');
+if (plan.schemaVersion !== 2 || !plan.changed || plan.selected.length !== 2 || !/^[a-fA-F0-9]{40}$/.test(fingerprint)) throw new Error('Invalid APT publication plan');
+const keyringConfig = readFileSync('keyring.json');
+const keyringIdentity = JSON.parse(keyringConfig.toString());
+if (`${keyringIdentity.packageVersion}-${keyringIdentity.packageRelease}` !== plan.releaseIdentity || createHash('sha256').update(keyringConfig).update(readFileSync(pinnedKey)).digest('hex') !== plan.releaseContentSha256) throw new Error('APT keyring content differs from publication plan');
 const actualFingerprint = run('gpg', ['--with-colons', '--list-secret-keys', fingerprint]).split('\n').find(line => line.startsWith('fpr:'))?.split(':')[9];
 if (actualFingerprint !== fingerprint) throw new Error('APT signing key identity mismatch');
 const exportedKey = run('gpg', ['--batch', '--armor', '--export', fingerprint]);
@@ -42,13 +45,26 @@ for (const value of plan.selected) {
   if (prior && prior.sha256 !== hash) throw new Error(`Published same-version package changed: ${value.version}`);
   packageRecords.push({ version: value.version, sourceCommit: value.sourceCommit, assetSha256: value.assetSha256, sha256: hash, toolingCommit: prior?.toolingCommit ?? (prior ? JSON.parse(readFileSync(join(input, 'live', 'publication.json'), 'utf8')).toolingCommit : plan.toolingCommit) });
 }
+const keyringName = `normlang-archive-keyring_${plan.releaseIdentity}_all.deb`;
+const keyringPath = join(packages, keyringName);
+const published = existsSync(join(input, 'live', 'publication.json')) ? JSON.parse(readFileSync(join(input, 'live', 'publication.json'), 'utf8')) : null;
+const priorPublication = plan.releaseChanged ? null : published;
+if (plan.releaseChanged) run('node', [join(tooling, 'cli/compiler/scripts/apt-repository.mjs'), 'keyring', plan.releaseIdentity, pinnedKey, packages]);
+else copyFileSync(join(input, 'packages', keyringName), keyringPath);
+if (run('dpkg-deb', ['--field', keyringPath, 'Version']).trim() !== plan.releaseIdentity || run('dpkg-deb', ['--field', keyringPath, 'Package']).trim() !== 'normlang-archive-keyring') throw new Error('APT keyring package identity mismatch');
+const keyringHash = sha256(keyringPath);
+if (priorPublication?.releasePackage?.sha256 !== undefined && priorPublication.releasePackage.sha256 !== keyringHash) throw new Error('Published same-version keyring package changed');
+const [keyringVersion, keyringRelease] = plan.releaseIdentity.split('-');
+const releasePackage = { identity: plan.releaseIdentity, version: keyringVersion, release: keyringRelease, releaseContentSha256: plan.releaseContentSha256, sha256: keyringHash, toolingCommit: priorPublication?.releasePackage?.toolingCommit ?? plan.toolingCommit };
 const repository = join(output, 'apt-repository');
 run('node', [join(tooling, 'cli/compiler/scripts/apt-repository.mjs'), 'repository', packages, repository, fingerprint]);
 const oldPackages = join(output, 'old-packages');
 mkdirSync(oldPackages);
 copyFileSync(join(packages, `normlang_${plan.selected[1].version}_amd64.deb`), join(oldPackages, `normlang_${plan.selected[1].version}_amd64.deb`));
+const oldKeyringName = published?.releasePackage ? `normlang-archive-keyring_${published.releasePackage.identity}_all.deb` : keyringName;
+copyFileSync(published?.releasePackage ? join(input, 'packages', oldKeyringName) : keyringPath, join(oldPackages, oldKeyringName));
 run('node', [join(tooling, 'cli/compiler/scripts/apt-repository.mjs'), 'repository', oldPackages, join(output, 'apt-repository-old'), fingerprint]);
 const record = join(repository, 'publication.json');
-writeFileSync(record, JSON.stringify({ schemaVersion: 1, toolingCommit: plan.toolingCommit, packages: packageRecords }, null, 2) + '\n');
+writeFileSync(record, JSON.stringify({ schemaVersion: 2, toolingCommit: plan.toolingCommit, packages: packageRecords, releasePackage }, null, 2) + '\n');
 run('gpg', ['--batch', '--yes', '--local-user', fingerprint, '--armor', '--detach-sign', '--output', `${record}.asc`, record]);
 console.log(JSON.stringify({ versions: packageRecords.map(item => item.version), hashes: packageRecords.map(item => item.sha256) }));
