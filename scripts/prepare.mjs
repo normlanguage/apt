@@ -29,11 +29,14 @@ function releasePackageIndex(releaseText, packages) {
   if (!line || Number(line[2]) !== packages.length || line[1].toLowerCase() !== sha256(packages)) throw new Error('Signed Packages checksum mismatch');
   const entries = packages.toString('utf8').trim().split(/\n\n+/).map(paragraph => {
     const fields = new Map(paragraph.split('\n').map(value => /^([^:]+):\s*(.*)$/.exec(value)).filter(Boolean).map(value => [value[1], value[2]]));
-    if (fields.get('Package') !== 'normlang' || fields.get('Architecture') !== 'amd64') throw new Error('Unexpected package in Norm APT index');
+    const packageName = fields.get('Package');
+    if (!['normlang', 'normlang-archive-keyring'].includes(packageName)) throw new Error('Unexpected package in Norm APT index');
+    if (fields.get('Architecture') !== (packageName === 'normlang' ? 'amd64' : 'all')) throw new Error('Unexpected architecture in Norm APT index');
     const version = fields.get('Version');
     const filename = fields.get('Filename');
-    if (filename !== `pool/main/n/normlang/normlang_${version}_amd64.deb` || !/^[a-fA-F0-9]{64}$/.test(fields.get('SHA256') ?? '')) throw new Error('Invalid Norm APT package index');
-    return [version, { filename, sha256: fields.get('SHA256').toLowerCase() }];
+    const expected = packageName === 'normlang' ? `pool/main/n/normlang/normlang_${version}_amd64.deb` : `pool/main/n/normlang-archive-keyring/normlang-archive-keyring_${version}_all.deb`;
+    if (filename !== expected || !/^[a-fA-F0-9]{64}$/.test(fields.get('SHA256') ?? '')) throw new Error('Invalid Norm APT package index');
+    return [`${packageName}:${version}`, { filename, sha256: fields.get('SHA256').toLowerCase() }];
   });
   const index = new Map(entries);
   if (index.size !== entries.length) throw new Error('Duplicate Norm APT package version');
@@ -49,7 +52,8 @@ async function main() {
   const renew = process.env.APT_RENEW_SIGNING_KEY === 'true';
   const bootstrap = process.env.APT_BOOTSTRAP === 'true';
   if (!/^https:\/\//.test(site) || !/^[a-fA-F0-9]{40}$/.test(toolingCommit)) throw new Error('Invalid publication identity');
-  const { assertSigningKeyLifetime, downloadAttestedReleaseAsset, officialReleaseSources, planPublication } = await import(pathToFileURL(join(tooling, 'cli/compiler/scripts/release-publication.mjs')).href);
+  const { assertSigningKeyLifetime, downloadAttestedReleaseAsset, officialReleaseSources } = await import(pathToFileURL(join(tooling, 'cli/compiler/scripts/release-publication.mjs')).href);
+  const { planAptPublication } = await import(pathToFileURL(join(tooling, 'cli/compiler/scripts/apt-publication.mjs')).href);
   mkdirSync(output, { recursive: true });
   const publicKey = resolve('normlang-archive-keyring.asc');
   const keyListing = run('gpg', ['--show-keys', '--with-colons', publicKey]);
@@ -74,10 +78,11 @@ async function main() {
     run('gpgv', ['--keyring', join(live, 'keyring.gpg'), join(live, 'publication.json.asc'), join(live, 'publication.json')]);
     const index = releasePackageIndex(readFileSync(join(live, 'Release'), 'utf8'), readFileSync(join(live, 'Packages')));
     published = JSON.parse(readFileSync(join(live, 'publication.json'), 'utf8'));
-    if (published.schemaVersion !== 1 || !Array.isArray(published.packages) || published.packages.length < 1 || published.packages.length > 2 || published.packages.length !== index.size) throw new Error('Invalid published package record');
+    if (![1, 2].includes(published.schemaVersion) || !Array.isArray(published.packages) || published.packages.length < 1 || published.packages.length > 2 || published.packages.length + Number(Boolean(published.releasePackage)) !== index.size) throw new Error('Invalid published package record');
     for (const value of published.packages) {
-      if (index.get(value.version)?.sha256 !== value.sha256) throw new Error(`Published package identity mismatch: ${value.version}`);
+      if (index.get(`normlang:${value.version}`)?.sha256 !== value.sha256) throw new Error(`Published package identity mismatch: ${value.version}`);
     }
+    if (published.releasePackage && index.get(`normlang-archive-keyring:${published.releasePackage.identity}`)?.sha256 !== published.releasePackage.sha256) throw new Error('Published keyring package identity mismatch');
     if (!readFileSync(join(live, 'key.asc')).equals(readFileSync(publicKey)) && !renew) throw new Error('Live APT signing key changed without explicit renewal');
   } else {
     if (renew) throw new Error('Cannot renew an unpublished APT repository');
@@ -86,8 +91,8 @@ async function main() {
     if (deployments.length > 0) throw new Error('Published APT site is missing; refusing bootstrap reset');
   }
 
-  const plan = planPublication(selected, published, renew);
-  writeFileSync(join(output, 'plan.json'), JSON.stringify({ schemaVersion: 1, toolingCommit, selected, ...plan }, null, 2) + '\n');
+  const plan = planAptPublication(selected, published, readFileSync('keyring.json'), readFileSync(publicKey), renew);
+  writeFileSync(join(output, 'plan.json'), JSON.stringify({ schemaVersion: 2, toolingCommit, selected, ...plan }, null, 2) + '\n');
   if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, `changed=${plan.changed}\n`, { flag: 'a' });
   if (!plan.changed) {
     console.log(JSON.stringify({ changed: false, selected: selected.map(value => value.version) }));
@@ -98,12 +103,19 @@ async function main() {
   if (published) {
     const index = releasePackageIndex(readFileSync(join(live, 'Release'), 'utf8'), readFileSync(join(live, 'Packages')));
     for (const version of plan.reuse) {
-      const value = index.get(version);
+      const value = index.get(`normlang:${version}`);
       if (!value) throw new Error(`Published package missing: ${version}`);
       const path = join(packages, `normlang_${version}_amd64.deb`);
       await download(`${site}/${value.filename}`, path);
       if (sha256(readFileSync(path)) !== value.sha256) throw new Error(`Live package checksum mismatch: ${version}`);
     }
+  }
+  if (published?.releasePackage) {
+    const value = releasePackageIndex(readFileSync(join(live, 'Release'), 'utf8'), readFileSync(join(live, 'Packages'))).get(`normlang-archive-keyring:${published.releasePackage.identity}`);
+    if (!value) throw new Error('Published keyring package missing');
+    const path = join(packages, `normlang-archive-keyring_${published.releasePackage.identity}_all.deb`);
+    await download(`${site}/${value.filename}`, path);
+    if (sha256(readFileSync(path)) !== value.sha256) throw new Error('Live keyring package checksum mismatch');
   }
   for (const version of plan.build) {
     const value = selected.find(item => item.version === version);
