@@ -47,7 +47,7 @@ install -m 644 -o normapt-public -g normapt-public norm-tooling/cli/compiler/scr
 
 installed=yes
 apt-get install -y "normlang=$previous"
-runuser -u normapt-public -- norm --version | grep -Fx "norm $previous"
+norm --version | grep -Fx "norm $previous"
 apt-get update
 apt-get upgrade -y
 runuser -u normapt-public -- norm --version | grep -Fx "norm $current"
@@ -59,5 +59,14 @@ apt-get remove -y normlang
 installed=no
 test ! -e /usr/bin/norm
 test ! -e /usr/lib/normlang
-test -f /home/normapt-public/project/hello.norm
 test -e "$keyring"
+
+installed=yes
+apt-get install -y normlang
+runuser -u normapt-public -- norm --version | grep -Fx "norm $current"
+runuser -u normapt-public -- sh -c 'cd /home/normapt-public/project && norm run hello.norm' | grep -Fx 'Hello from Norm'
+apt-get remove -y normlang
+installed=no
+test ! -e /usr/bin/norm
+test ! -e /usr/lib/normlang
+test -f /home/normapt-public/project/hello.norm
