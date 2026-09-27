@@ -1,5 +1,7 @@
 # Norm APT repository
 
+[简体中文](README.zh-CN.md)
+
 This repository publishes the signed Debian 13 `amd64` packages for [Norm](https://github.com/normlanguage/Norm). The public package index is at `https://normlanguage.github.io/apt/`.
 
 Install the repository key and verify its fingerprint:
